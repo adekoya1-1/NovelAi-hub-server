@@ -79,6 +79,10 @@ const storySchema = new mongoose.Schema({
     type: String,
     enum: ['draft', 'published'],
     default: 'published'
+  },
+  image: {
+    type: String,
+    default: null
   }
 }, {
   timestamps: true,

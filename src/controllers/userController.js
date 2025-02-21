@@ -2,12 +2,74 @@ const User = require('../models/User');
 const jwt = require('jsonwebtoken');
 const path = require('path');
 const crypto = require('crypto');
+const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
+const { formatBufferTo64 } = require('../middleware/upload');
+
+// Constants for validation
+const USERNAME_MAX_LENGTH = 20;
+const PASSWORD_MAX_LENGTH = 128;
+const ALLOWED_IMAGE_TYPES = ['image/jpeg', 'image/png', 'image/gif'];
+const MAX_IMAGE_SIZE = 5 * 1024 * 1024; // 5MB
 
 // Generate JWT Token
 const generateToken = (id) => {
   return jwt.sign({ id }, process.env.JWT_SECRET, {
     expiresIn: '30d'
   });
+};
+
+// Validation helpers
+const validateUsername = (username) => {
+  if (!username || typeof username !== 'string') {
+    return 'Username is required';
+  }
+  username = username.trim();
+  if (username.length < 3) {
+    return 'Username must be at least 3 characters long';
+  }
+  if (username.length > USERNAME_MAX_LENGTH) {
+    return `Username must be less than ${USERNAME_MAX_LENGTH} characters`;
+  }
+  if (!/^[a-zA-Z0-9_-]+$/.test(username)) {
+    return 'Username can only contain letters, numbers, underscores, and hyphens';
+  }
+  return null;
+};
+
+const validateEmail = (email) => {
+  if (!email || typeof email !== 'string') {
+    return 'Email is required';
+  }
+  email = email.trim().toLowerCase();
+  if (!/^\S+@\S+\.\S+$/.test(email)) {
+    return 'Please enter a valid email address';
+  }
+  return null;
+};
+
+const validatePassword = (password) => {
+  if (!password || typeof password !== 'string') {
+    return 'Password is required';
+  }
+  if (password.length < 6) {
+    return 'Password must be at least 6 characters long';
+  }
+  if (password.length > PASSWORD_MAX_LENGTH) {
+    return `Password must be less than ${PASSWORD_MAX_LENGTH} characters`;
+  }
+  return null;
+};
+
+const validateImage = (file) => {
+  if (!file) return null;
+  
+  if (!ALLOWED_IMAGE_TYPES.includes(file.mimetype)) {
+    return 'Please upload a valid image file (JPEG, PNG, or GIF)';
+  }
+  if (file.size > MAX_IMAGE_SIZE) {
+    return 'Image size should be less than 5MB';
+  }
+  return null;
 };
 
 // @desc    Register new user
@@ -17,19 +79,56 @@ const registerUser = async (req, res) => {
   try {
     const { username, email, password } = req.body;
 
-    // Check if user exists
-    const userExists = await User.findOne({ $or: [{ email }, { username }] });
-    if (userExists) {
+    // Validate input
+    const usernameError = validateUsername(username);
+    if (usernameError) {
       return res.status(400).json({
         success: false,
-        message: 'User already exists'
+        message: usernameError
+      });
+    }
+
+    const emailError = validateEmail(email);
+    if (emailError) {
+      return res.status(400).json({
+        success: false,
+        message: emailError
+      });
+    }
+
+    const passwordError = validatePassword(password);
+    if (passwordError) {
+      return res.status(400).json({
+        success: false,
+        message: passwordError
+      });
+    }
+
+    // Check if user exists
+    const userExists = await User.findOne({
+      $or: [
+        { email: email.toLowerCase() },
+        { username: username.trim() }
+      ]
+    });
+
+    if (userExists) {
+      if (userExists.email === email.toLowerCase()) {
+        return res.status(400).json({
+          success: false,
+          message: 'Email is already registered'
+        });
+      }
+      return res.status(400).json({
+        success: false,
+        message: 'Username is already taken'
       });
     }
 
     // Create user
     const user = await User.create({
-      username,
-      email,
+      username: username.trim(),
+      email: email.toLowerCase(),
       password
     });
 
@@ -44,9 +143,10 @@ const registerUser = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(400).json({
+    console.error('Registration error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error during registration'
     });
   }
 };
@@ -58,8 +158,23 @@ const loginUser = async (req, res) => {
   try {
     const { email, password } = req.body;
 
+    const emailError = validateEmail(email);
+    if (emailError) {
+      return res.status(400).json({
+        success: false,
+        message: emailError
+      });
+    }
+
+    if (!password) {
+      return res.status(400).json({
+        success: false,
+        message: 'Password is required'
+      });
+    }
+
     // Find user
-    const user = await User.findOne({ email });
+    const user = await User.findOne({ email: email.toLowerCase() });
 
     // Check password
     if (user && (await user.matchPassword(password))) {
@@ -80,9 +195,10 @@ const loginUser = async (req, res) => {
       });
     }
   } catch (error) {
-    res.status(400).json({
+    console.error('Login error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error during login'
     });
   }
 };
@@ -96,27 +212,25 @@ const getUserProfile = async (req, res) => {
       .select('-password')
       .populate('stories');
 
-    if (user) {
-      res.json({
-        success: true,
-        data: user
-      });
-    } else {
-      res.status(404).json({
+    if (!user) {
+      return res.status(404).json({
         success: false,
         message: 'User not found'
       });
     }
+
+    res.json({
+      success: true,
+      data: user
+    });
   } catch (error) {
-    res.status(400).json({
+    console.error('Get profile error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error while fetching profile'
     });
   }
 };
-
-const { uploadToCloudinary, deleteFromCloudinary } = require('../config/cloudinary');
-const { formatBufferTo64 } = require('../middleware/upload');
 
 // @desc    Upload profile picture
 // @route   POST /api/users/profile/picture
@@ -127,6 +241,14 @@ const uploadProfilePicture = async (req, res) => {
       return res.status(400).json({
         success: false,
         message: 'Please upload an image file'
+      });
+    }
+
+    const imageError = validateImage(req.file);
+    if (imageError) {
+      return res.status(400).json({
+        success: false,
+        message: imageError
       });
     }
 
@@ -167,9 +289,10 @@ const uploadProfilePicture = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(400).json({
+    console.error('Profile picture upload error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error while uploading profile picture'
     });
   }
 };
@@ -188,37 +311,62 @@ const updateUserProfile = async (req, res) => {
       });
     }
 
-    // Check if email is being updated and if it's already in use
-    if (req.body.email && req.body.email !== user.email) {
-      const emailExists = await User.findOne({ email: req.body.email });
-      if (emailExists) {
+    // Validate username if provided
+    if (req.body.username) {
+      const usernameError = validateUsername(req.body.username);
+      if (usernameError) {
         return res.status(400).json({
           success: false,
-          message: 'Email already in use'
+          message: usernameError
         });
+      }
+
+      if (req.body.username !== user.username) {
+        const usernameExists = await User.findOne({ username: req.body.username.trim() });
+        if (usernameExists) {
+          return res.status(400).json({
+            success: false,
+            message: 'Username is already taken'
+          });
+        }
       }
     }
 
-    // Check if username is being updated and if it's already in use
-    if (req.body.username && req.body.username !== user.username) {
-      const usernameExists = await User.findOne({ username: req.body.username });
-      if (usernameExists) {
+    // Validate email if provided
+    if (req.body.email) {
+      const emailError = validateEmail(req.body.email);
+      if (emailError) {
         return res.status(400).json({
           success: false,
-          message: 'Username already in use'
+          message: emailError
         });
+      }
+
+      if (req.body.email.toLowerCase() !== user.email) {
+        const emailExists = await User.findOne({ email: req.body.email.toLowerCase() });
+        if (emailExists) {
+          return res.status(400).json({
+            success: false,
+            message: 'Email is already registered'
+          });
+        }
       }
     }
 
-    user.username = req.body.username || user.username;
-    user.email = req.body.email || user.email;
-    
-    // If changing password, verify current password
+    // Validate password change
     if (req.body.newPassword) {
       if (!req.body.currentPassword) {
         return res.status(400).json({
           success: false,
           message: 'Current password is required to change password'
+        });
+      }
+
+      const passwordError = validatePassword(req.body.newPassword);
+      if (passwordError) {
+        return res.status(400).json({
+          success: false,
+          message: passwordError
         });
       }
 
@@ -233,6 +381,10 @@ const updateUserProfile = async (req, res) => {
       user.password = req.body.newPassword;
     }
 
+    // Update user fields
+    if (req.body.username) user.username = req.body.username.trim();
+    if (req.body.email) user.email = req.body.email.toLowerCase();
+
     const updatedUser = await user.save();
 
     res.json({
@@ -246,9 +398,10 @@ const updateUserProfile = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(400).json({
+    console.error('Profile update error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error while updating profile'
     });
   }
 };
@@ -267,15 +420,24 @@ const deleteUserAccount = async (req, res) => {
       });
     }
 
+    // Delete user's profile picture from Cloudinary if it exists
+    const profilePicPublicId = user.profilePicture ? 
+      user.profilePicture.split('/').slice(-1)[0].split('.')[0] : null;
+    
+    if (profilePicPublicId && !profilePicPublicId.includes('default-avatar')) {
+      await deleteFromCloudinary(profilePicPublicId);
+    }
+
     await User.deleteOne({ _id: user._id });
     res.json({
       success: true,
       message: 'User account deleted successfully'
     });
   } catch (error) {
-    res.status(400).json({
+    console.error('Account deletion error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error while deleting account'
     });
   }
 };
@@ -286,7 +448,16 @@ const deleteUserAccount = async (req, res) => {
 const forgotPassword = async (req, res) => {
   try {
     const { email } = req.body;
-    const user = await User.findOne({ email });
+
+    const emailError = validateEmail(email);
+    if (emailError) {
+      return res.status(400).json({
+        success: false,
+        message: emailError
+      });
+    }
+
+    const user = await User.findOne({ email: email.toLowerCase() });
 
     if (!user) {
       return res.status(404).json({
@@ -312,9 +483,10 @@ const forgotPassword = async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(400).json({
+    console.error('Forgot password error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error while processing password reset request'
     });
   }
 };
@@ -325,6 +497,21 @@ const forgotPassword = async (req, res) => {
 const resetPassword = async (req, res) => {
   try {
     const { token, newPassword } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        success: false,
+        message: 'Reset token is required'
+      });
+    }
+
+    const passwordError = validatePassword(newPassword);
+    if (passwordError) {
+      return res.status(400).json({
+        success: false,
+        message: passwordError
+      });
+    }
 
     const user = await User.findOne({
       resetPasswordToken: token,
@@ -349,9 +536,10 @@ const resetPassword = async (req, res) => {
       message: 'Password reset successful'
     });
   } catch (error) {
-    res.status(400).json({
+    console.error('Reset password error:', error);
+    res.status(500).json({
       success: false,
-      message: error.message
+      message: 'Server error while resetting password'
     });
   }
 };

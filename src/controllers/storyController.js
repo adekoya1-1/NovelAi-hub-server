@@ -1,5 +1,8 @@
 const Story = require('../models/Story');
 const User = require('../models/User');
+const { uploadToCloudinary } = require('../config/cloudinary');
+const { formatBufferTo64 } = require('../middleware/upload');
+const fetch = require('node-fetch');
 
 // @desc    Create new story
 // @route   POST /api/stories
@@ -7,6 +10,15 @@ const User = require('../models/User');
 const createStory = async (req, res) => {
   try {
     const { title, content, genre, isAIGenerated } = req.body;
+    let imageUrl = null;
+
+    // Handle image upload if present
+    if (req.file) {
+      const file64 = formatBufferTo64(req.file);
+      file64.folder = 'novel-ai-hub/story-images';
+      const uploadResult = await uploadToCloudinary(file64);
+      imageUrl = uploadResult.url;
+    }
 
     // Validate required fields
     if (!title || !content || !genre) {
@@ -48,7 +60,8 @@ const createStory = async (req, res) => {
       author: req.user._id,
       isAIGenerated,
       wordCount: content.trim().split(/\s+/).length,
-      likes: []
+      likes: [],
+      image: imageUrl
     });
 
     // Add story to user's stories array
@@ -371,6 +384,156 @@ const getUserStories = async (req, res) => {
   }
 };
 
+// @desc    Generate AI story
+// @route   POST /api/stories/generate
+// @access  Private
+const generateAIStory = async (req, res) => {
+  try {
+    const { prompt } = req.body;
+
+    if (!prompt) {
+      return res.status(400).json({
+        success: false,
+        message: 'Please provide a prompt for the story'
+      });
+    }
+
+    const deepseekEndpoint = 'https://api.deepseek.com/v1/chat/completions';
+    const apiKey = process.env.DEEPSEEK_API_KEY;
+
+    if (!apiKey) {
+      return res.status(500).json({
+        success: false,
+        message: 'DeepSeek API key not configured'
+      });
+    }
+
+    try {
+      // Generate story
+      const storyResponse = await fetch(deepseekEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [
+            {
+              role: 'system',
+              content: `You are a creative story writer. Write an engaging story based on the given prompt. 
+              The story should be well-structured, include descriptive language, and be between 500-1000 words.
+              Focus on character development, setting description, and a clear plot arc.`
+            },
+            {
+              role: 'user',
+              content: prompt
+            }
+          ],
+          temperature: 0.8,
+          max_tokens: 2000,
+          top_p: 0.9,
+          frequency_penalty: 0.5,
+          presence_penalty: 0.5
+        })
+      });
+
+      const storyData = await storyResponse.json();
+      if (!storyData.choices || !storyData.choices[0]) {
+        throw new Error('Invalid response from DeepSeek API');
+      }
+
+      const generatedStory = storyData.choices[0].message.content.trim();
+
+      // Generate title
+      const titleResponse = await fetch(deepseekEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [
+            {
+              role: 'system',
+              content: 'Generate a short, engaging title (max 5 words) for this story:'
+            },
+            {
+              role: 'user',
+              content: generatedStory
+            }
+          ],
+          temperature: 0.7,
+          max_tokens: 50,
+          top_p: 0.9
+        })
+      });
+
+      const titleData = await titleResponse.json();
+      if (!titleData.choices || !titleData.choices[0]) {
+        throw new Error('Invalid response from DeepSeek API for title generation');
+      }
+
+      const generatedTitle = titleData.choices[0].message.content.trim();
+
+      // Suggest genre
+      const genreResponse = await fetch(deepseekEndpoint, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`
+        },
+        body: JSON.stringify({
+          model: 'deepseek-chat',
+          messages: [
+            {
+              role: 'system',
+              content: 'Select one genre from this list that best matches the story: fantasy, romance, mystery, science-fiction, horror, thriller, historical-fiction, adventure, young-adult, literary-fiction, dystopian, paranormal, contemporary, crime, drama, comedy, action, slice-of-life, supernatural, psychological'
+            },
+            {
+              role: 'user',
+              content: generatedStory
+            }
+          ],
+          temperature: 0.3,
+          max_tokens: 20,
+          top_p: 0.9
+        })
+      });
+
+      const genreData = await genreResponse.json();
+      if (!genreData.choices || !genreData.choices[0]) {
+        throw new Error('Invalid response from DeepSeek API for genre suggestion');
+      }
+
+      const suggestedGenre = genreData.choices[0].message.content.trim().toLowerCase();
+
+      res.json({
+        success: true,
+        data: {
+          title: generatedTitle,
+          content: generatedStory,
+          genre: suggestedGenre,
+          isAIGenerated: true
+        }
+      });
+    } catch (error) {
+      console.error('Error with DeepSeek API:', error);
+      res.status(500).json({
+        success: false,
+        message: 'An error occurred during story generation'
+      });
+    }
+  } catch (error) {
+    console.error('Story generation error:', error);
+    res.status(500).json({
+      success: false,
+      message: error.message || 'Failed to generate story'
+    });
+  }
+};
+
 module.exports = {
   createStory,
   getStories,
@@ -379,5 +542,6 @@ module.exports = {
   deleteStory,
   toggleLikeStory,
   addComment,
-  getUserStories
+  getUserStories,
+  generateAIStory
 };

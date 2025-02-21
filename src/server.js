@@ -1,5 +1,6 @@
 const express = require('express');
 const path = require('path');
+const fs = require('fs');  // Added missing fs import
 const cors = require('cors');
 const dotenv = require('dotenv');
 const connectDB = require('./config/db');
@@ -31,7 +32,10 @@ const connectWithRetry = async (retries = 5, interval = 5000) => {
   for (let i = 0; i < retries; i++) {
     try {
       dbConnected = await connectDB();
-      if (dbConnected) break;
+      if (dbConnected) {
+        console.log('Database connected successfully');
+        break;
+      }
     } catch (error) {
       console.error(`Database connection attempt ${i + 1} failed:`, error.message);
       if (i < retries - 1) {
@@ -42,23 +46,50 @@ const connectWithRetry = async (retries = 5, interval = 5000) => {
   }
 };
 
+// Start database connection
 connectWithRetry();
 
 // Middleware
 app.use(cors(corsOptions));
+
+// Increase JSON payload limit and add raw body for webhooks
 app.use(express.json({
-  limit: '10mb',
+  limit: '50mb',
   verify: (req, res, buf) => {
     req.rawBody = buf;
   }
 }));
-app.use(express.urlencoded({ extended: false, limit: '10mb' }));
+
+// Increase URL-encoded payload limit
+app.use(express.urlencoded({ 
+  extended: true, 
+  limit: '50mb'
+}));
 
 // Serve static files
-app.use('/uploads', express.static(path.join(__dirname, '../public/uploads')));
-if (process.env.NODE_ENV === 'production') {
-  app.use(express.static(path.join(__dirname, '../../../dist')));
+const publicDir = path.join(__dirname, '../public');
+const uploadsDir = path.join(publicDir, 'uploads');
+
+// Create directories if they don't exist
+if (!fs.existsSync(publicDir)) {
+  fs.mkdirSync(publicDir, { recursive: true });
 }
+if (!fs.existsSync(uploadsDir)) {
+  fs.mkdirSync(uploadsDir, { recursive: true });
+}
+
+// Serve static files from public directory with proper MIME types
+app.use('/public', express.static(publicDir, {
+  setHeaders: (res, path) => {
+    if (path.endsWith('.js')) {
+      res.setHeader('Content-Type', 'application/javascript');
+    } else if (path.endsWith('.css')) {
+      res.setHeader('Content-Type', 'text/css');
+    } else if (path.endsWith('.json')) {
+      res.setHeader('Content-Type', 'application/json');
+    }
+  }
+}));
 
 // Request logging middleware
 app.use((req, res, next) => {
@@ -79,7 +110,18 @@ app.get('/health', (req, res) => {
     status: dbConnected ? 'ok' : 'degraded',
     server: 'running',
     database: dbConnected ? 'connected' : 'disconnected',
-    timestamp: new Date().toISOString()
+    timestamp: new Date().toISOString(),
+    env: process.env.NODE_ENV,
+    port: process.env.PORT,
+    frontend: process.env.FRONTEND_URL
+  });
+});
+
+// API 404 handler
+app.use('/api/*', (req, res) => {
+  res.status(404).json({
+    success: false,
+    message: 'API endpoint not found'
   });
 });
 
@@ -89,81 +131,83 @@ app.use(globalErrorHandler);
 
 // Handle frontend routes in production
 if (process.env.NODE_ENV === 'production') {
+  const clientBuildPath = path.join(__dirname, '../../../client/dist');
+  
+  // Serve static files from the React app
+  app.use(express.static(clientBuildPath));
+  
+  // Handle React routing, return all requests to React app
   app.get('*', (req, res) => {
     if (!req.url.startsWith('/api')) {
-      res.sendFile(path.join(__dirname, '../../../dist/index.html'));
-    } else {
-      res.status(404).json({
-        success: false,
-        message: 'API route not found'
-      });
+      res.sendFile(path.join(clientBuildPath, 'index.html'));
     }
-  });
-} else {
-  // Handle 404 in development
-  app.use((req, res) => {
-    res.status(404).json({
-      success: false,
-      message: 'Route not found'
-    });
   });
 }
 
 const PORT = process.env.PORT || 5000;
 
-// Handle unhandled promise rejections
-process.on('unhandledRejection', (err) => {
-  console.error('Unhandled Promise Rejection:', err);
-  // Log the error but don't crash the server
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', (err) => {
-  console.error('Uncaught Exception:', err);
-  // Log the error but don't crash the server
-});
-
 // Create server with error handling
-let server;
-try {
-  server = app.listen(PORT)
-    .on('error', (err) => {
-      if (err.code === 'EADDRINUSE') {
-        console.log(`Port ${PORT} is busy, trying ${PORT + 1}...`);
-        server.listen(PORT + 1);
-      } else {
-        console.error('Server error:', err);
-      }
-    })
-    .on('listening', () => {
-      console.log(`Server running in ${process.env.NODE_ENV} mode on port ${server.address().port}`);
+const startServer = () => {
+  try {
+    const server = app.listen(PORT, () => {
+      console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`);
       if (!dbConnected) {
         console.log('Warning: Server is running in degraded mode - database is not connected');
-        console.log('API endpoints requiring database access will not function properly');
       }
     });
 
-  // Graceful shutdown
-  const shutdown = (signal) => {
-    console.log(`${signal} received. Shutting down gracefully...`);
-    server.close(() => {
-      console.log('Server closed');
-      process.exit(0);
+    // Handle server errors
+    server.on('error', (error) => {
+      if (error.code === 'EADDRINUSE') {
+        console.log(`Port ${PORT} is busy, trying ${PORT + 1}...`);
+        setTimeout(() => {
+          server.close();
+          startServer(PORT + 1);
+        }, 1000);
+      } else {
+        console.error('Server error:', error);
+        process.exit(1);
+      }
     });
 
-    // Force close after 10s
-    setTimeout(() => {
-      console.error('Could not close connections in time, forcefully shutting down');
-      process.exit(1);
-    }, 10000);
-  };
+    // Graceful shutdown
+    const shutdown = async (signal) => {
+      console.log(`${signal} received. Shutting down gracefully...`);
+      server.close(() => {
+        console.log('Server closed');
+        process.exit(0);
+      });
 
-  process.on('SIGTERM', () => shutdown('SIGTERM'));
-  process.on('SIGINT', () => shutdown('SIGINT'));
+      // Force close after 10s
+      setTimeout(() => {
+        console.error('Could not close connections in time, forcefully shutting down');
+        process.exit(1);
+      }, 10000);
+    };
 
-} catch (error) {
-  console.error('Failed to start server:', error);
+    // Handle termination signals
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+
+    return server;
+  } catch (error) {
+    console.error('Failed to start server:', error);
+    process.exit(1);
+  }
+};
+
+// Handle uncaught exceptions and unhandled rejections
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
   process.exit(1);
-}
+});
+
+process.on('unhandledRejection', (err) => {
+  console.error('Unhandled Rejection:', err);
+  process.exit(1);
+});
+
+// Start the server
+startServer();
 
 module.exports = app;

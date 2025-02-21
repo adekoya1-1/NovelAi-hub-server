@@ -28,7 +28,7 @@ const userSchema = new mongoose.Schema({
   }],
   profilePicture: {
     type: String,
-    default: 'https://res.cloudinary.com/dgsze7s06/image/upload/v1/novel-ai-hub/profile-pictures/default-avatar'
+    default: '/default-avatar.png' // Changed to use local default avatar
   },
   createdAt: {
     type: Date,

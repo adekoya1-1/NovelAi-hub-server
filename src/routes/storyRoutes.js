@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect } = require('../middleware/auth');
+const { upload } = require('../middleware/upload');
 const {
   createStory,
   getStories,
@@ -9,7 +10,8 @@ const {
   deleteStory,
   toggleLikeStory,
   addComment,
-  getUserStories
+  getUserStories,
+  generateAIStory
 } = require('../controllers/storyController');
 
 // Public routes
@@ -18,7 +20,8 @@ router.get('/user/:userId', protect, getUserStories); // Add this before :id rou
 router.get('/:id', getStoryById);
 
 // Protected routes
-router.post('/', protect, createStory);
+router.post('/', protect, upload.single('image'), createStory);
+router.post('/generate', protect, generateAIStory); // AI story generation endpoint
 router.route('/:id')
   .put(protect, updateStory)
   .delete(protect, deleteStory);
